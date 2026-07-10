@@ -80,20 +80,15 @@
         if (input.isContentEditable || input.getAttribute('contenteditable') === 'true') {
             input.focus();
             
-            // Clear existing content
             input.innerHTML = '';
             input.textContent = '';
             
-            // Try execCommand (works for most contenteditable editors)
             document.execCommand('insertText', false, msg);
             
-            // Also set innerText as backup
             input.innerText = msg;
             
-            // Dispatch react-compatible input event
             input.dispatchEvent(new Event('input', { bubbles: true }));
             
-            // Try using TextEvent (older but sometimes needed)
             try {
                 const textEvent = new InputEvent('beforeinput', {
                     data: msg,
@@ -106,12 +101,10 @@
         }
 
         // === APPROACH 3: Slate.js / Draft.js / ProseMirror editors ===
-        // Some editors use custom data attributes
         const slateEditor = input.closest('[data-slate-editor]') || 
                            document.querySelector('[data-slate-editor]');
         if (slateEditor) {
             slateEditor.focus();
-            // For Slate.js, we need to insert via the Selection API
             const selection = window.getSelection();
             const range = document.createRange();
             range.selectNodeContents(slateEditor);
@@ -124,7 +117,6 @@
 
         // === Press Enter to send ===
         setTimeout(() => {
-            // Dispatch enter key events
             ['keydown', 'keypress', 'keyup'].forEach(eventType => {
                 const evt = new KeyboardEvent(eventType, {
                     key: 'Enter',
@@ -139,7 +131,6 @@
                 if (slateEditor) slateEditor.dispatchEvent(evt);
             });
 
-            // Try to find and click a send button
             const sendBtn = document.querySelector(
                 'button[class*="send"], ' +
                 'button[aria-label*="send" i], ' +
@@ -154,7 +145,6 @@
                 sendBtn.click();
                 console.log("[Triangulet] Clicked send button");
             } else {
-                // Try to find any clickable element near the input
                 const container = input.closest('div, section, form, [class*="chat"], [class*="message"], [class*="input"], [class*="footer"]');
                 if (container) {
                     const buttons = container.querySelectorAll('button, a, [role="button"]');
@@ -204,31 +194,94 @@
         return [];
     }
 
+    // === Pause logic: every 15 messages, pause 7 seconds ===
+    let messagesSincePause = 0;
+    let isPaused = false;
+    let pendingResume = null;
+
+    function sendWithPause(intervalId, ms) {
+        if (isPaused) return; // Don't send while paused
+        
+        sendMessage();
+        messagesSincePause++;
+        
+        // Check if we've hit 15 messages and need to pause
+        if (messagesSincePause >= 15) {
+            isPaused = true;
+            messagesSincePause = 0;
+            
+            // Clear the current interval
+            clearInterval(intervalId);
+            
+            const log = document.createElement("div");
+            log.textContent = `> ⏸ Paused 7s (reached 15 messages)`;
+            logs.appendChild(log);
+            logs.scrollTop = logs.scrollHeight;
+            statusEl.textContent = `⏸ Paused 7s`;
+            
+            console.log(`[Triangulet] ⏸ Pausing 7 seconds after 15 messages`);
+            
+            // After 7 seconds, resume
+            pendingResume = setTimeout(() => {
+                isPaused = false;
+                pendingResume = null;
+                
+                const log2 = document.createElement("div");
+                log2.textContent = `> ▶ Resumed`;
+                logs.appendChild(log2);
+                logs.scrollTop = logs.scrollHeight;
+                statusEl.textContent = `▶ Resumed`;
+                
+                console.log(`[Triangulet] ▶ Resuming`);
+                
+                // Restart the interval
+                const newIntervalId = setInterval(() => sendWithPause(newIntervalId, ms), ms);
+                
+                // Update the correct interval reference
+                if (ms === 2000) interval2s = newIntervalId;
+                else if (ms === 3000) interval3s = newIntervalId;
+                else if (ms === 4000) interval4s = newIntervalId;
+            }, 7000);
+        }
+    }
+
     // === Create the UI ===
     let interval2s = null;
     let interval3s = null;
     let interval4s = null;
 
     function startSpam(ms) {
+        // Clear any existing pause state
+        if (pendingResume) { clearTimeout(pendingResume); pendingResume = null; }
+        isPaused = false;
+        messagesSincePause = 0;
+        
         if (ms === 2000) {
             if (window.interval2s) return;
             sendCount = 0;
             sendMessage();
-            window.interval2s = setInterval(sendMessage, ms);
+            messagesSincePause = 1;
+            window.interval2s = setInterval(() => sendWithPause(window.interval2s, 2000), 2000);
         } else if (ms === 3000) {
             if (window.interval3s) return;
             sendCount = 0;
             sendMessage();
-            window.interval3s = setInterval(sendMessage, ms);
+            messagesSincePause = 1;
+            window.interval3s = setInterval(() => sendWithPause(window.interval3s, 3000), 3000);
         } else if (ms === 4000) {
             if (window.interval4s) return;
             sendCount = 0;
             sendMessage();
-            window.interval4s = setInterval(sendMessage, ms);
+            messagesSincePause = 1;
+            window.interval4s = setInterval(() => sendWithPause(window.interval4s, 4000), 4000);
         }
     }
 
     function stopSpam(ms) {
+        if (pendingResume) { clearTimeout(pendingResume); pendingResume = null; }
+        isPaused = false;
+        messagesSincePause = 0;
+        
         if (ms === 2000) {
             if (!window.interval2s) return;
             clearInterval(window.interval2s);
@@ -283,7 +336,7 @@
     content.style.cssText = "display:flex;flex-direction:column;gap:6px;";
     box.appendChild(content);
 
-    // Spam controls
+    // Spam controls with pause info
     [2000, 3000, 4000].forEach(ms => {
         const wrapper = document.createElement("div");
         wrapper.style.cssText = "display:flex;align-items:center;gap:6px;";
@@ -291,7 +344,7 @@
         cb.type = "checkbox";
         cb.addEventListener("change", () => cb.checked ? startSpam(ms) : stopSpam(ms));
         const label = document.createElement("label");
-        label.textContent = `Spam (${ms / 1000}s)`;
+        label.textContent = `Spam (${ms / 1000}s) [pause every 15]`;
         wrapper.appendChild(cb);
         wrapper.appendChild(label);
         content.appendChild(wrapper);
@@ -315,7 +368,6 @@
     netBtn.addEventListener("click", () => {
         let info = "=== SCANNING FOR CHAT FUNCTIONS ===\n\n";
         
-        // Check socket.io
         info += `window.io: ${typeof window.io}\n`;
         info += `window.socket: ${typeof window.socket}\n`;
         
@@ -357,7 +409,6 @@
             } catch(e) {}
         }
         
-        // Find all inputs on page
         const inputs = document.querySelectorAll('input:not([type="hidden"]), textarea, [contenteditable="true"], div[role="textbox"]');
         info += `\nFound ${inputs.length} input elements on page\n`;
         inputs.forEach((el, i) => {
@@ -378,7 +429,7 @@
     // Status
     const statusEl = document.createElement("div");
     statusEl.style.cssText = "font-size:11px;color:#aaa;text-align:center;padding:4px;background:#111;border-radius:4px;margin-top:2px;";
-    statusEl.textContent = 'Click "Find Chat Function" first';
+    statusEl.textContent = 'Ready - Pauses every 15 messages';
     content.appendChild(statusEl);
 
     // Log window
@@ -395,7 +446,7 @@
         log.textContent = `> #${sendCount} ${result ? 'sent' : 'FAILED'} at ${new Date().toLocaleTimeString()}`;
         logs.appendChild(log);
         logs.scrollTop = logs.scrollHeight;
-        statusEl.textContent = `Last: #${sendCount} | ${new Date().toLocaleTimeString()}`;
+        statusEl.textContent = `Last: #${sendCount} | ${new Date().toLocaleTimeString()}${isPaused ? ' | ⏸ PAUSED' : ''}`;
         return result;
     };
 
@@ -430,5 +481,5 @@
         document.addEventListener("mouseup", () => { if (isDown) { isDown = false; document.body.style.userSelect = ""; } });
     })(box);
 
-    console.log("%cTriangulet v2 Mod loaded","font-size:16px;color:green");
+    console.log("%cTriangulet v2 Mod loaded (with 15-msg pause)","font-size:16px;color:green");
 })();
