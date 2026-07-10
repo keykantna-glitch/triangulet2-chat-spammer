@@ -1,0 +1,434 @@
+(async function TriModMenu() {
+    console.log("[Triangulet] Loading v2 mod menu...");
+
+    // === Generate random 10-letter text ===
+    function randomText() {
+        const chars = "abcdefghijklmnopqrstuvwxyz";
+        let result = "";
+        for (let i = 0; i < 10; i++) {
+            result += chars[Math.floor(Math.random() * chars.length)];
+        }
+        return result;
+    }
+
+    let sendCount = 0;
+
+    // === The main send function ===
+    function sendMessage() {
+        const msg = randomText();
+        sendCount++;
+        
+        console.log(`[Triangulet] Attempt #${sendCount}: "${msg}"`);
+
+        // Find ALL possible input elements on the page
+        const allInputs = document.querySelectorAll(
+            'textarea, ' +
+            'input[type="text"], ' +
+            'input[type="search"], ' +
+            'input[type="email"], ' +
+            'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="color"]):not([type="range"]), ' +
+            '[contenteditable="true"], ' +
+            'div[role="textbox"], ' +
+            '[data-slate-editor], ' +
+            '[contenteditable]:not([contenteditable="false"])'
+        );
+
+        if (allInputs.length === 0) {
+            console.log("[Triangulet] ❌ No input found on page");
+            return false;
+        }
+
+        // Pick the most likely chat input: last visible input on the page
+        let input = null;
+        for (let i = allInputs.length - 1; i >= 0; i--) {
+            const el = allInputs[i];
+            if (el.offsetParent !== null || el.getBoundingClientRect) {
+                try {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 20 && rect.height > 10) {
+                        input = el;
+                        break;
+                    }
+                } catch(e) {}
+            }
+        }
+        
+        if (!input) input = allInputs[allInputs.length - 1];
+        
+        input.focus();
+        input.click();
+        console.log(`[Triangulet] Using input: ${input.tagName} ${input.id || ''} ${(input.className || '').slice(0, 40)}`);
+
+        // === APPROACH 1: Textarea / Input element ===
+        if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+                input.tagName === 'TEXTAREA'
+                    ? window.HTMLTextAreaElement.prototype
+                    : window.HTMLInputElement.prototype,
+                'value'
+            )?.set;
+            if (nativeSetter) {
+                nativeSetter.call(input, msg);
+            } else {
+                input.value = msg;
+            }
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        // === APPROACH 2: ContentEditable (Discord, Slack, etc.) ===
+        if (input.isContentEditable || input.getAttribute('contenteditable') === 'true') {
+            input.focus();
+            
+            // Clear existing content
+            input.innerHTML = '';
+            input.textContent = '';
+            
+            // Try execCommand (works for most contenteditable editors)
+            document.execCommand('insertText', false, msg);
+            
+            // Also set innerText as backup
+            input.innerText = msg;
+            
+            // Dispatch react-compatible input event
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            
+            // Try using TextEvent (older but sometimes needed)
+            try {
+                const textEvent = new InputEvent('beforeinput', {
+                    data: msg,
+                    inputType: 'insertText',
+                    bubbles: true,
+                    cancelable: true
+                });
+                input.dispatchEvent(textEvent);
+            } catch(e) {}
+        }
+
+        // === APPROACH 3: Slate.js / Draft.js / ProseMirror editors ===
+        // Some editors use custom data attributes
+        const slateEditor = input.closest('[data-slate-editor]') || 
+                           document.querySelector('[data-slate-editor]');
+        if (slateEditor) {
+            slateEditor.focus();
+            // For Slate.js, we need to insert via the Selection API
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(slateEditor);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.execCommand('insertText', false, msg);
+            slateEditor.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // === Press Enter to send ===
+        setTimeout(() => {
+            // Dispatch enter key events
+            ['keydown', 'keypress', 'keyup'].forEach(eventType => {
+                const evt = new KeyboardEvent(eventType, {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                });
+                input.dispatchEvent(evt);
+                if (slateEditor) slateEditor.dispatchEvent(evt);
+            });
+
+            // Try to find and click a send button
+            const sendBtn = document.querySelector(
+                'button[class*="send"], ' +
+                'button[aria-label*="send" i], ' +
+                'button[aria-label*="Submit" i], ' +
+                'button[type="submit"], ' +
+                'svg[class*="send"], ' +
+                '[class*="send-button"], ' +
+                '[class*="submit"]'
+            );
+            
+            if (sendBtn) {
+                sendBtn.click();
+                console.log("[Triangulet] Clicked send button");
+            } else {
+                // Try to find any clickable element near the input
+                const container = input.closest('div, section, form, [class*="chat"], [class*="message"], [class*="input"], [class*="footer"]');
+                if (container) {
+                    const buttons = container.querySelectorAll('button, a, [role="button"]');
+                    for (const btn of buttons) {
+                        if (btn.offsetParent !== null) {
+                            btn.click();
+                            console.log("[Triangulet] Clicked nearby button");
+                            break;
+                        }
+                    }
+                }
+            }
+        }, 150);
+
+        console.log(`[Triangulet] ✅ Attempted send #${sendCount}`);
+        return true;
+    }
+
+    // === Try to find the chat's send function by inspecting the page ===
+    function findSendFunction() {
+        const results = [];
+        
+        const candidates = [
+            { obj: window, name: 'socket' },
+            { obj: window, name: 'io' },
+            { obj: window, name: 'chatSocket' },
+            { obj: window, name: 'chat' },
+            { obj: window, name: 'triangulet' },
+        ];
+        
+        for (const c of candidates) {
+            if (c.obj[c.name]) {
+                results.push({ name: c.name, value: c.obj[c.name] });
+            }
+        }
+        
+        return results;
+    }
+
+    // === Try to find WebSocket instances ===
+    function findWebSockets() {
+        try {
+            if (window.queryObjects) {
+                return window.queryObjects(WebSocket);
+            }
+        } catch(e) {}
+        return [];
+    }
+
+    // === Create the UI ===
+    let interval2s = null;
+    let interval3s = null;
+    let interval4s = null;
+
+    function startSpam(ms) {
+        if (ms === 2000) {
+            if (window.interval2s) return;
+            sendCount = 0;
+            sendMessage();
+            window.interval2s = setInterval(sendMessage, ms);
+        } else if (ms === 3000) {
+            if (window.interval3s) return;
+            sendCount = 0;
+            sendMessage();
+            window.interval3s = setInterval(sendMessage, ms);
+        } else if (ms === 4000) {
+            if (window.interval4s) return;
+            sendCount = 0;
+            sendMessage();
+            window.interval4s = setInterval(sendMessage, ms);
+        }
+    }
+
+    function stopSpam(ms) {
+        if (ms === 2000) {
+            if (!window.interval2s) return;
+            clearInterval(window.interval2s);
+            window.interval2s = null;
+        } else if (ms === 3000) {
+            if (!window.interval3s) return;
+            clearInterval(window.interval3s);
+            window.interval3s = null;
+        } else if (ms === 4000) {
+            if (!window.interval4s) return;
+            clearInterval(window.interval4s);
+            window.interval4s = null;
+        }
+    }
+
+    const box = document.createElement("div");
+    Object.assign(box.style, {
+        position:"fixed", top:"10px", right:"10px", width:"280px",
+        padding:"10px", background:"#1e1e1e", color:"#eee",
+        border:"2px solid #444", borderRadius:"12px", zIndex:"2147483647",
+        fontFamily:"monospace", boxShadow:"0 6px 18px rgba(0,0,0,0.8)",
+        display:"flex", flexDirection:"column", gap:"6px", maxWidth:"400px",
+        overflow:"auto", resize:"both"
+    });
+    document.body.appendChild(box);
+
+    // Header
+    const headerContainer = document.createElement("div");
+    headerContainer.style.cssText = "display:flex;justify-content:space-between;align-items:center;";
+    box.appendChild(headerContainer);
+
+    const header = document.createElement("h4");
+    header.textContent = "Triangulet v2 Mod";
+    header.style.cssText = "margin:0;flex:1;font-size:13px;user-select:none;";
+    headerContainer.appendChild(header);
+
+    const btnsContainer = document.createElement("div");
+    btnsContainer.style.cssText = "display:flex;gap:4px;";
+    headerContainer.appendChild(btnsContainer);
+
+    const minimizeBtn = document.createElement("button");
+    minimizeBtn.textContent = "–";
+    Object.assign(minimizeBtn.style, {cursor:"pointer",fontWeight:"bold",fontSize:"16px",border:"none",background:"transparent",color:"#eee",padding:"0 4px"});
+    btnsContainer.appendChild(minimizeBtn);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "×";
+    Object.assign(closeBtn.style, {cursor:"pointer",fontWeight:"bold",fontSize:"16px",border:"none",background:"transparent",color:"#f33",padding:"0 4px"});
+    btnsContainer.appendChild(closeBtn);
+
+    const content = document.createElement("div");
+    content.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+    box.appendChild(content);
+
+    // Spam controls
+    [2000, 3000, 4000].forEach(ms => {
+        const wrapper = document.createElement("div");
+        wrapper.style.cssText = "display:flex;align-items:center;gap:6px;";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.addEventListener("change", () => cb.checked ? startSpam(ms) : stopSpam(ms));
+        const label = document.createElement("label");
+        label.textContent = `Spam (${ms / 1000}s)`;
+        wrapper.appendChild(cb);
+        wrapper.appendChild(label);
+        content.appendChild(wrapper);
+    });
+
+    // Test button
+    const testBtn = document.createElement("button");
+    testBtn.textContent = "▶ Click to Send Test";
+    Object.assign(testBtn.style, {width:"100%",padding:"8px",borderRadius:"6px",border:"1px solid #555",background:"#2a5a2a",color:"#fff",cursor:"pointer",fontWeight:"bold",fontSize:"13px"});
+    testBtn.addEventListener("click", () => {
+        sendMessage();
+        testBtn.textContent = `✅ Sent #${sendCount}`;
+        setTimeout(() => { testBtn.textContent = "▶ Click to Send Test"; }, 1500);
+    });
+    content.appendChild(testBtn);
+
+    // Network debug
+    const netBtn = document.createElement("button");
+    netBtn.textContent = "🔍 Find Chat Function";
+    Object.assign(netBtn.style, {width:"100%",padding:"6px",borderRadius:"6px",border:"1px solid #555",background:"#333",color:"#eee",cursor:"pointer",fontSize:"12px"});
+    netBtn.addEventListener("click", () => {
+        let info = "=== SCANNING FOR CHAT FUNCTIONS ===\n\n";
+        
+        // Check socket.io
+        info += `window.io: ${typeof window.io}\n`;
+        info += `window.socket: ${typeof window.socket}\n`;
+        
+        if (window.socket) {
+            info += `  socket.emit: ${typeof window.socket.emit}\n`;
+            info += `  socket.send: ${typeof window.socket.send}\n`;
+        }
+        
+        if (window.io) {
+            info += `\nio() connections found\n`;
+        }
+        
+        info += `\ntriangulet global: ${typeof triangulet}\n`;
+        if (typeof triangulet !== 'undefined' && triangulet) {
+            info += `triangulet keys: ${Object.keys(triangulet).slice(0, 10).join(', ')}\n`;
+        }
+        
+        const originalSend = WebSocket.prototype.send;
+        let wsFound = false;
+        WebSocket.prototype.send = function(data) {
+            console.log("[Triangulet WS Intercept]", data);
+            wsFound = true;
+            info += `\n⚠️ WebSocket.send() called with: ${data}\n`;
+            return originalSend.call(this, data);
+        };
+        
+        info += `\nScanning window for socket-like objects...\n`;
+        for (const key of Object.keys(window)) {
+            try {
+                const val = window[key];
+                if (val && typeof val === 'object' && !val.nodeType) {
+                    if (typeof val.emit === 'function' && key !== 'io') {
+                        info += `  ➡ ${key} has .emit()\n`;
+                    }
+                    if (typeof val.send === 'function' && val !== WebSocket.prototype) {
+                        info += `  ➡ ${key} has .send()\n`;
+                    }
+                }
+            } catch(e) {}
+        }
+        
+        // Find all inputs on page
+        const inputs = document.querySelectorAll('input:not([type="hidden"]), textarea, [contenteditable="true"], div[role="textbox"]');
+        info += `\nFound ${inputs.length} input elements on page\n`;
+        inputs.forEach((el, i) => {
+            info += `#${i}: ${el.tagName} | id="${el.id}" | placeholder="${el.placeholder}" | visible=${el.offsetParent !== null}\n`;
+        });
+        
+        info += `\nCheck the Console tab (F12) for WebSocket intercepts.\n`;
+        
+        setTimeout(() => {
+            WebSocket.prototype.send = originalSend;
+        }, 10000);
+        
+        alert(info);
+        console.log(info);
+    });
+    content.appendChild(netBtn);
+
+    // Status
+    const statusEl = document.createElement("div");
+    statusEl.style.cssText = "font-size:11px;color:#aaa;text-align:center;padding:4px;background:#111;border-radius:4px;margin-top:2px;";
+    statusEl.textContent = 'Click "Find Chat Function" first';
+    content.appendChild(statusEl);
+
+    // Log window
+    const logs = document.createElement("div");
+    Object.assign(logs.style, {maxHeight:"150px",overflow:"auto",background:"#111",padding:"6px",borderRadius:"6px",fontSize:"11px",color:"#0f0",fontFamily:"monospace"});
+    logs.textContent = "> Ready";
+    content.appendChild(logs);
+
+    // Override sendMessage to log
+    const origSend = sendMessage;
+    sendMessage = function() {
+        const result = origSend();
+        const log = document.createElement("div");
+        log.textContent = `> #${sendCount} ${result ? 'sent' : 'FAILED'} at ${new Date().toLocaleTimeString()}`;
+        logs.appendChild(log);
+        logs.scrollTop = logs.scrollHeight;
+        statusEl.textContent = `Last: #${sendCount} | ${new Date().toLocaleTimeString()}`;
+        return result;
+    };
+
+    minimizeBtn.addEventListener("click", () => {
+        content.style.display = content.style.display === "none" ? "flex" : "none";
+        box.style.width = content.style.display === "none" ? "140px" : "280px";
+    });
+    closeBtn.addEventListener("click", () => {
+        stopSpam(2000);
+        stopSpam(3000);
+        stopSpam(4000);
+        box.remove();
+    });
+
+    // Dragging
+    (function drag(el) {
+        let isDown = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+        el.style.cursor = "move";
+        header.addEventListener("mousedown", e => {
+            if (["INPUT","SELECT","BUTTON"].includes(e.target.tagName)) return;
+            isDown = true;
+            startX = e.clientX; startY = e.clientY;
+            startLeft = el.offsetLeft; startTop = el.offsetTop;
+            document.body.style.userSelect = "none";
+        });
+        document.addEventListener("mousemove", e => {
+            if (!isDown) return;
+            el.style.left = startLeft + (e.clientX - startX) + "px";
+            el.style.top = startTop + (e.clientY - startY) + "px";
+            el.style.right = "auto"; el.style.bottom = "auto";
+        });
+        document.addEventListener("mouseup", () => { if (isDown) { isDown = false; document.body.style.userSelect = ""; } });
+    })(box);
+
+    console.log("%cTriangulet v2 Mod loaded","font-size:16px;color:green");
+})();
